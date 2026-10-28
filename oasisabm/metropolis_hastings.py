@@ -7,17 +7,17 @@ import seaborn as sns
 import itertools
 from copy import deepcopy
 
-from operators import Operator, OperatorFactory
-from helper_func import activity_colors
-from activity import Schedule
+from oasisabm.operators import Operator, OperatorFactory
+from oasisabm.helper_func import activity_colors
+from oasisabm.activity import Schedule
 from typing import Dict, List, Optional, Union, Tuple, Generator
 
 
 # -------------------------- RANDOM WALK -----------------------------------#
 
 def random_walk(init_sched: Schedule, n_iter: int = 1000, operators: Optional[List] = None,
-p_operators: Optional[List] = None, uniform: bool = False, param_file:Optional[str] = None,
-rnd_term:float = None, **kwargs)->Generator[Tuple[Schedule, Operator, float], None, None]:
+p_operators: Optional[List] = None, uniform: bool = False, param_file:Union[str, Dict, None] = None,
+rnd_term:float = None, max_episodes: Optional[Dict] = None, min_activities: int = 1, min_duration: float = 0, yield_rejected: bool = False, log_weights: bool = False, **kwargs)->Generator[Tuple[Schedule, Operator, float], None, None]:
         """
         Random walk generator
 
@@ -27,9 +27,17 @@ rnd_term:float = None, **kwargs)->Generator[Tuple[Schedule, Operator, float], No
         - n_iter: number of iterations
         - p_operators: operators probabilities
         - uniform: if True, defines a constant target distribution
-        - param_file: location of file containing the parameters
+        - param_file: location of file containing the parameters, or dictionary of parameters
         - rnd_term: random term to add to the utility function
-        - kwargs: additional keyword arguments
+        - max_episodes: maximum number of episodes per activity type (excluding the first and last home activities).
+          Proposals with more episodes, or that do not start and end at home, are rejected.
+        - min_activities: minimum number of activities in the schedule (e.g. 3 excludes days spent at home)
+        - min_duration: minimum duration of each activity, in hours
+        - log_weights: if True, the target weight is exp(utility), i.e. the utility is the logarithm of the weight.
+          Otherwise (original behaviour) the utility is the weight.
+        - yield_rejected: if True, the current state is yielded at every iteration (also when the proposal is rejected),
+          so that the yielded states are draws from the target distribution. Otherwise, only accepted states are yielded.
+        - kwargs: additional keyword arguments, passed to the operators (e.g. list_act)
 
         Returns
         -------------
@@ -57,12 +65,17 @@ rnd_term:float = None, **kwargs)->Generator[Tuple[Schedule, Operator, float], No
         #Start walk
         for n in range(n_iter):
             new_state = deepcopy(current_state)
-            op = op_factory.draw(operators, p_operators)
+            op = op_factory.draw(operators, p_operators, **kwargs)
 
             try:
                 new_state = op.apply_change(new_state)
                 new_state.streamline()
-            except:
+            except Exception:
+                new_state = None
+
+            if new_state is None or not is_valid(new_state, max_episodes, min_activities, min_duration):
+                if yield_rejected:
+                    yield current_state, op, None
                 continue
 
             #Compute change probabilities
@@ -71,7 +84,10 @@ rnd_term:float = None, **kwargs)->Generator[Tuple[Schedule, Operator, float], No
 
             #Compute new weights and log-ratio (acceptance proba)
             new_weight = target_weight(new_state, uniform=uniform, param_file=param_file, rnd_term=rnd_term)
-            ratio = min(np.log(abs(new_weight)) - np.log(abs(current_weight)) + np.log(b_proba) - np.log(f_proba), 0)
+            if log_weights:
+                ratio = min(new_weight - current_weight + np.log(b_proba) - np.log(f_proba), 0)
+            else:
+                ratio = min(np.log(abs(new_weight)) - np.log(abs(current_weight)) + np.log(b_proba) - np.log(f_proba), 0)
 
 
             #Accept proposal
@@ -85,6 +101,37 @@ rnd_term:float = None, **kwargs)->Generator[Tuple[Schedule, Operator, float], No
 
 
                 yield current_state, op, ratio
+
+            elif yield_rejected:
+                yield current_state, op, None
+
+def is_valid(sched: Schedule, max_episodes: Optional[Dict] = None, min_activities: int = 1, min_duration: float = 0, home: str = 'home') -> bool:
+    """
+    Checks that a schedule starts and ends at home, has enough activities, and does not have more episodes of
+    each activity type than allowed.
+
+    Parameters
+    -----------------
+    - sched: Schedule object
+    - max_episodes: maximum number of episodes per activity type, excluding the first and last home activities.
+      Types that are not keys of the dictionary are not allowed.
+    - min_activities: minimum number of activities in the schedule
+    - min_duration: minimum duration of each activity, in hours
+    - home: label of the home activity
+    """
+    labels = sched.all_labels
+    if len(labels) < min_activities:
+        return False
+    if min_duration > 0 and any(a.duration < min_duration - 1e-9 for a in sched.list_act):
+        return False
+    if labels[0] not in [home, 'dawn'] or labels[-1] not in [home, 'dusk']:
+        return False
+    if max_episodes is not None:
+        middle = labels[1:-1]
+        for label in set(middle):
+            if middle.count(label) > max_episodes.get(label, 0):
+                return False
+    return True
 
 def forward_probability(current_state: Schedule, proposal_state: Schedule, operator: Operator) -> float:
     """Returns forward probability to go from state i (current state) to j (proposed state) within a given iteration.
@@ -130,7 +177,7 @@ def backward_probability(current_state: Schedule, proposal_state: Schedule, oper
     return proba
 
 
-def target_weight(sched: Schedule, uniform: bool =False, param_file: Optional[str] = None, rnd_term:Optional[float] = None) -> float:
+def target_weight(sched: Schedule, uniform: bool =False, param_file: Union[str, Dict, None] = None, rnd_term:Optional[float] = None) -> float:
     """
     Computes target weight for MH --> utility of schedule from initial model estimated with simple random sampling
 
@@ -138,7 +185,7 @@ def target_weight(sched: Schedule, uniform: bool =False, param_file: Optional[st
     -----------------
     -sched: Schedule object
     -uniform: if True, returns constant weight
-    -param_file: file where to find parameters
+    -param_file: file where to find parameters, or dictionary of parameters
     -rnd_term: random term for the utility function
 
     """
@@ -148,8 +195,7 @@ def target_weight(sched: Schedule, uniform: bool =False, param_file: Optional[st
 
     else:
 
-        parameters = joblib.load(param_file)
-        parameters['business_trip:constant'] = 0
+        parameters = param_file if isinstance(param_file, dict) else joblib.load(param_file)
 
         weight = sched.compute_utility(parameters, rnd_term)
 

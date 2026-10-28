@@ -1,0 +1,7 @@
+.venv/
+oasisabm/_version.py
+__pycache__/
+experiments/nts2023/outputs/
+*.egg-info/
+.pytest_cache/
+PLAN.md

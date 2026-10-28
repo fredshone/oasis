@@ -1,31 +1,17 @@
-# OASIS v1.0.0
+# OASIS for activity scheduling 
 
-[![DOI](https://zenodo.org/badge/685457042.svg)](https://zenodo.org/badge/latestdoi/685457042) [![PyPI version](https://badge.fury.io/py/oasisabm.svg)](https://badge.fury.io/py/oasisabm) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+WIP for converting OASIS to activity scheduling only and estimating on NTS 2023.
 
-## Description
+Based on [OASIS](https://zenodo.org/badge/latestdoi/685457042).
 
-This is a stable version of the OASIS activity-based framework. This repository includes the simulation code, based on the Python API of the CPLEX solver.
-
-For more details, you can find the technical reports in the **Literature** folder, and the full documentation [here](https://oasis-abm.readthedocs.io/en/latest/).
 
 ## Installation guide   
 
-OASIS can be installed with the following command: 
+local install. `uv` works well.
 
-``pip install oasisabm`` 
-
-We recommend creating a new environment using the provided requirements file to install the correct packages. 
 **NB: You need a valid CPLEX user license to use the solver, which can be obtained [here](https://www.ibm.com/academic/topic/data-science).**
 
-## Tutorial 
 
-An example of how to run the simulator is provided in the ``demo`` notebooks. Your main function should be added in the ``runner`` script, which you can run by typing the following command:
-``python runner.py``
+## NTS 2023 experiment
 
-## Citation
-
-If you found this repository useful, you can acknowledge the authors by citing:
-
-* Pougala, J., Hillel, T., and Bierlaire M. (2023) *OASIS: Optimisation-based Activity Scheduling with Integrated Simultaneous choice dimensions*, Transportation Research Part C: Emerging Technologies, vol. 155, p. 104291, DOI: [https://doi.org/10.1016/j.trc.2023.104291](https://doi.org/10.1016/j.trc.2023.104291)
-
-
+The `nts2023` branch adapts OASIS to NTS 2023 diary schedules (no trips) and compares it with caveat models. See [experiments/nts2023/README.md](experiments/nts2023/README.md) for the changes made to the library, the experiments and the results.

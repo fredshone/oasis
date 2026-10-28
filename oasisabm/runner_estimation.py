@@ -1,11 +1,13 @@
 import joblib
+from pathlib import Path
 
-from estimation import ChoiceSetGenerator
-from helper_func import parse_df_schedule
+from oasisabm.estimation import ChoiceSetGenerator
+from oasisabm.helper_func import parse_df_schedule
 
-DATA = joblib.load('../data/example_data_estimation.joblib')
-TT = joblib.load('../data/example_tt.joblib')
-PARAMS = '../data/target_params_032023.joblib'
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+DATA = joblib.load(DATA_DIR / 'example_data_estimation.joblib')
+TT = joblib.load(DATA_DIR / 'example_tt.joblib')
+PARAMS = DATA_DIR / 'target_params_032023.joblib'
 
 MH_PARAMS = {"n_iter":1000,
 "n_burn": 50,

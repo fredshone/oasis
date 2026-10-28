@@ -25,6 +25,44 @@ def data_reader(df: pd.DataFrame, parameters: Optional[Dict] = None) -> List:
     return activities
 
 
+def activity_copies(max_episodes: Dict[str, int], parameters: Optional[Dict] = None, desired_times: Optional[Dict] = None,
+    act_id: Optional[Dict] = None, location: str = 'none', mode: Optional[str] = None, home: str = 'home') -> List:
+    """
+    Creates the list of ActivityData objects for a model with repeated activities: 'dawn' and 'dusk' at home, plus
+    K copies of each activity type, labelled '{type}_{k}' (e.g. shop_1, shop_2). Mid-day returns home are copies of the home type.
+
+    Parameters
+    ---------------
+    - max_episodes: maximum number of episodes per activity type, e.g. {'home': 2, 'work': 2, 'shop': 2}.
+      For the home type, this is the number of mid-day home episodes (dawn and dusk are always included).
+    - parameters: dictionary of parameters per activity type, {type: {'constant':..., 'early':..., 'late':..., 'short':..., 'long':...}}
+    - desired_times: dictionary of preferred times per activity type, {type: {'desired_start_time':..., 'desired_duration':...}}
+    - act_id: dictionary mapping activity types to integer IDs
+    - location: location of all activities
+    - mode: mode of transportation of all activities
+    - home: label of the home activity type
+
+    Returns
+    ---------------
+    List of ActivityData objects
+    """
+    desired_times = desired_times or {}
+    act_id = act_id or {t: i for i, t in enumerate([home] + [t for t in max_episodes if t != home], 1)}
+
+    def create(label, group, act_type):
+        times = desired_times.get(act_type, {})
+        params = parameters.get(act_type) if parameters else None
+        return ActivityData(label=label, group=group, location=location, mode=mode, activity_parameters=params,
+            desired_start=times.get('desired_start_time'), desired_duration=times.get('desired_duration'),
+            act_id=act_id[act_type])
+
+    activities = [create('dawn', 'dawn', home)]
+    for act_type, k_max in max_episodes.items():
+        activities.extend(create(f'{act_type}_{k}', act_type, act_type) for k in range(1, k_max + 1))
+    activities.append(create('dusk', 'dusk', home))
+    return activities
+
+
 class ActivityData():
     """
     This class stores the data related to an activity (type, location, mode, feasible times), and associated parameters (desired times, penalties).
@@ -99,7 +137,7 @@ class ActivityData():
             else:
                 act_id_default = {"home": 1,"work":2,"education":3,"shopping":4,
                 "errands_services":5,"business_trip":6,"leisure":8, "escort":9}
-                self.act_id = act_id_default[self.type] if self.type else None
+                self.act_id = act_id_default.get(self.type) if self.type else None
 
     def read_from_pandas(self, df: pd.DataFrame, params: Optional[Dict]) -> None:
         """

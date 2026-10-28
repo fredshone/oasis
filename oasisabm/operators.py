@@ -2,7 +2,7 @@ import warnings
 import numpy as np
 import pandas as pd
 from copy import deepcopy
-from activity import Activity, Schedule, ActivityFactory
+from oasisabm.activity import Activity, Schedule, ActivityFactory
 
 from typing import List, Dict, Tuple, Optional
 
@@ -151,10 +151,11 @@ class AddAnchor(Operator):
         #if np.log(np.random.rand()) >= np.log(self.proba):
         #    return schedule
 
-        current_anchors = schedule.anchor_nodes
+        current_anchors = list(schedule.anchor_nodes)
         new_anchor = np.random.uniform(0, 24)
 
-        if new_anchor not in current_anchors:
+        #at most 23 anchors (as in an empty schedule), so that the change probability is valid
+        if new_anchor not in current_anchors and len(current_anchors) < 23:
             current_anchors.append(new_anchor)
             schedule.anchor_nodes = current_anchors
 
@@ -228,7 +229,7 @@ class Assign(Operator):
 
         default_loc = schedule.get_home_location()
 
-        new_act = Activity(rnd_act, rnd_node, duration = schedule.discretization, mode = 'driving', location = default_loc)
+        new_act = Activity(rnd_act, rnd_node, duration = schedule.discretization, mode = 'driving', location = default_loc, desired_times = {})
 
         #find where the new activity fits in the schedule
         all_starts = schedule.all_starts
@@ -243,6 +244,17 @@ class Assign(Operator):
 
             act_in_sched[idx] = up_act
             new_act.location = up_act.location
+
+        else:
+            #The new activity starts during another activity: split it, so that it resumes after the new activity
+            container = schedule.which_activity(rnd_node)
+            idx = act_in_sched.index(container)
+            old_end = container.end_time
+            container.end_time = rnd_node
+            act_in_sched[idx] = container
+            if old_end > new_act.end_time:
+                act_in_sched.append(Activity(container.label, new_act.end_time, old_end - new_act.end_time,
+                    mode = container.mode, location = container.location, desired_times = {}))
 
         act_in_sched.append(new_act)
         act_in_sched = [x for x in act_in_sched if x] #Remove NaNs
@@ -294,7 +306,7 @@ class InflateDeflate(Operator):
         direction = np.random.randint(0, 2)  # 0 right (or clockwise) 1 left (or counterclockwise)
 
         #get position of activities in schedule
-        idx_inf = act_in_sched.index(rnd_act_inf.label)
+        idx_inf = act_in_sched.index(rnd_act_inf)
 
         if direction == 0:
             rnd_act_inf.end_time = rnd_act_inf.end_time + block_size #increase by one unit of time (from current discretization)
@@ -352,12 +364,16 @@ class Swap(Operator):
         swap = np.random.randint(0, 2)  # if swap = 0 swap with next act, else swap with previous one
 
         idx = act_in_sched.index(rnd_act)
+        if not 0 <= idx + (1 - 2 * swap) < len(act_in_sched):
+            #no neighbour on that side
+            return schedule
         first_act = act_in_sched[idx]
         second_act = act_in_sched[idx + (1 - 2 * swap)]
 
         try:
-            first_act.label = second_act.label
-            second_act.label = rnd_act.label
+            first_label, second_label = first_act.label, second_act.label
+            first_act.label = second_label
+            second_act.label = first_label
 
 
             act_in_sched[idx] = first_act
@@ -546,6 +562,7 @@ class MetaOperator(Operator):
         self.proba_operators = proba_operators
         self.operators = operators
         self._meta_type = self.optype
+        self.kwargs = kwargs
 
     @property
     def meta_type(self):
@@ -567,7 +584,7 @@ class MetaOperator(Operator):
 
         for idx in idx_op:
             operator = self.list_operators[idx]
-            obj = factory.create(operator, proba=self.proba_operators[idx])
+            obj = factory.create(operator, proba=self.proba_operators[idx], **self.kwargs)
             objects.append(obj)
             self.meta_type += f"_{operator}"
 
