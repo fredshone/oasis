@@ -6,10 +6,10 @@ import time
 from docplex.mp.model import Model
 from docplex.mp.dvar import Var
 from typing import List, Dict, Union, Optional
-from data_utils import cplex_to_df, print_time_format
+from oasisabm.data_utils import cplex_to_df, print_time_format
 
-from input_data import ActivityData
-from results import Results
+from oasisabm.input_data import ActivityData
+from oasisabm.results import Results
 
 
 class OptimModel():
@@ -103,22 +103,39 @@ class MIP(OptimModel):
     - clear: Deletes model object and associated variables/constraints
     - check_input:  checks if the input data is corret for the type of simulation selected (overrides parent method)
     """
-    def __init__(self, activities: List[ActivityData], utility_parameters: Dict, travel_times: Dict, distances: Optional[Dict] = None, period: int= 24, *args, **kwargs) -> None:
+    def __init__(self, activities: List[ActivityData], utility_parameters: Dict, travel_times: Optional[Dict] = None, distances: Optional[Dict] = None, period: int= 24,
+    allow_repeats: bool = False, min_duration: float = 1, require_out_of_home: bool = False, error_per_activity: bool = False, sequence_error: str = 'used', threads: Optional[int] = None, *args, **kwargs) -> None:
         super().__init__("MIP", activities, utility_parameters, *args, **kwargs)
         """
         Parameters
         ---------------
         - activities: List of unique activities (ActivityData objects) to be scheduled
         - utility_parameters: Dictionary containing non activity-specific parameters to use in the utility function.  The format should be {param: value}.
-        - travel_times: Dictionary containing the mode specific travel times. The format should be {mode: {origin: {destination_1: travel time, destination_2...}}}
+        - travel_times: Dictionary containing the mode specific travel times. The format should be {mode: {origin: {destination_1: travel time, destination_2...}}}.
+          If None, the model schedules activities only (no trips): activities run back to back and there are no travel time, cost or mode variables.
         - distances: Dictionary containing the mode specific distances. The format is the same as travel_times.
         - period: Time budget in hours. Default is 24h
-
+        - allow_repeats: if True, activities of the same group are ordered copies of one activity type (e.g. shop_1, shop_2), instead of mutually exclusive alternatives.
+          Only used when travel_times is None.
+        - min_duration: minimum duration of a scheduled activity, in hours. Only used when travel_times is None (the original model uses 1h).
+        - require_out_of_home: if True, schedules that stay at home all day are not allowed. Only used when travel_times is None.
+        - error_per_activity: if True, error terms are drawn separately for each activity group instead of being shared by all activities.
+          Only used when travel_times is None.
+        - sequence_error: 'all' sums error_z(z[a,b]) over all activities b, as in the model with trips, which adds
+          error_z(1) + (n_activities - 1) * error_z(0) to each scheduled activity. 'used' only adds error_z(1) for the
+          transition to the next activity. Only used when travel_times is None.
+        - threads: number of threads used by the solver (default: CPLEX default)
         """
 
         self.travel_times = travel_times
         self.distances = distances
         self.period = period
+        self.allow_repeats = allow_repeats
+        self.min_duration = min_duration
+        self.require_out_of_home = require_out_of_home
+        self.error_per_activity = error_per_activity
+        self.sequence_error = sequence_error
+        self.threads = threads
 
         self.model = None
 
@@ -168,10 +185,16 @@ class MIP(OptimModel):
         """
         self.clear()
 
+        if self.travel_times is None:
+            self._initialize_no_travel()
+            return None
+
         #-----------------------Create a docplex model object------------------------#
         self.model = Model()
         self.model.parameters.optimalitytarget = self.optimality_target
         self.model.parameters.timelimit = self.time_limit
+        if self.threads:
+            self.model.parameters.threads = self.threads
 
         #-----------------------Add (default) decision variables------------------------#
         self.x = self.model.continuous_var_dict(self.keys, lb = 0, name = 'x') #start time
@@ -258,6 +281,174 @@ class MIP(OptimModel):
         self.model.maximize(self.objective_function())
 
 
+    def _initialize_no_travel(self) -> None:
+        """
+        Creates the model object for activity schedules without trips (travel_times is None).
+
+        Activities run back to back, so the budget constraint is sum(d) == period. Sequence variables are only
+        created for feasible transitions (never between two activities of the same type, never into dawn or out of dusk).
+        Products of binary and continuous terms in the utility function are linearised, which keeps the model
+        within the size limits of the CPLEX Community Edition. This requires the penalty parameters
+        (early, late, short, long) to be negative or zero: positive values are set to zero.
+        """
+        mdl = Model()
+        mdl.parameters.optimalitytarget = self.optimality_target
+        mdl.parameters.timelimit = self.time_limit
+        if self.threads:
+            mdl.parameters.threads = self.threads
+        self.model = mdl
+
+        P = self.period
+        acts = {act.label: act for act in self.activities}
+
+        #feasible transitions: consecutive activities of the same type are merged into one, so are not allowed
+        self.arcs = [(a, b) for a in self.keys for b in self.keys
+                     if a != b and b != 'dawn' and a != 'dusk' and acts[a].type != acts[b].type]
+        if not self.require_out_of_home:
+            self.arcs.append(('dawn', 'dusk'))
+
+        #-----------------------Decision variables------------------------#
+        self.x = mdl.continuous_var_dict(self.keys, lb = 0, ub = P, name = 'x') #start time
+        self.d = mdl.continuous_var_dict(self.keys, lb = 0, ub = P, name = 'd') #duration
+        self.w = mdl.binary_var_dict(self.keys, name = 'w') #indicator of activity choice
+        self.z = mdl.binary_var_dict(self.arcs, name = 'z') #activity sequence indicator
+
+        #-----------------------Constraints------------------------#
+        #Budget constraint (no travel)
+        self.add_constraint(mdl.sum(self.d[a] for a in self.keys) == P)
+
+        #Start and end at home
+        self.add_constraint(self.x['dawn'] == 0)
+        self.add_constraint(self.x['dusk'] + self.d['dusk'] == P)
+        self.add_constraint(self.w['dawn'] == 1)
+        self.add_constraint(self.w['dusk'] == 1)
+
+        for act in self.activities:
+            a = act.label
+
+            #No duration if activity not performed
+            self.add_constraint(self.min_duration * self.w[a] <= self.d[a])
+            self.add_constraint(self.d[a] <= self.w[a] * P)
+
+            #Feasible time windows
+            if act.feasible_start > 0:
+                self.add_constraint(self.x[a] >= act.feasible_start)
+            self.add_constraint(self.x[a] + self.d[a] <= min(act.feasible_end, P))
+
+            #Predecessor and successor constraints
+            if a != 'dawn':
+                self.add_constraint(mdl.sum(self.z[b, c] for b, c in self.arcs if c == a) == self.w[a])
+            if a != 'dusk':
+                self.add_constraint(mdl.sum(self.z[b, c] for b, c in self.arcs if b == a) == self.w[a])
+
+        #Consistency constraints: the next activity starts after the previous one ends. With the budget constraint,
+        #this implies that activities are back to back.
+        self.add_constraints(self.x[a] + self.d[a] - self.x[b] <= (1 - self.z[a, b]) * P for a, b in self.arcs)
+
+        #Ordering of the copies of each activity type: copy k+1 can only be scheduled after copy k
+        if self.allow_repeats:
+            groups = {}
+            for act in self.activities:
+                groups.setdefault(act.group, []).append(act.label)
+            for copies in groups.values():
+                for a, b in zip(copies[:-1], copies[1:]):
+                    self.add_constraint(self.w[b] <= self.w[a])
+                    self.add_constraint(self.x[b] >= self.x[a] + self.d[a])
+        else:
+            #No group duplicates
+            groups = {act.group for act in self.activities}
+            for g in groups:
+                self.add_constraint(mdl.sum(self.w[act.label] for act in self.activities if act.group == g) <= 1)
+
+        #-----------------------Error terms------------------------#
+        types = sorted({act.type for act in self.activities})
+        n_draws = types if self.error_per_activity else ['all']
+        errors = {t: {'w': self.utility_parameters['error_w'].draw(2),
+                      'z': self.utility_parameters['error_z'].draw(2),
+                      'x': self.utility_parameters['error_x'].draw(4),
+                      'd': self.utility_parameters['error_d'].draw(6)} for t in n_draws}
+
+        self._errors = {act.label: errors[act.type if self.error_per_activity else 'all'] for act in self.activities}
+
+        #-----------------------Linearised utility terms------------------------#
+        self._penalties = {}
+        self._error_terms = {}
+        warned = False
+
+        for act in self.activities:
+            a = act.label
+            parameters = act.activity_parameters or {}
+            penalties = {}
+
+            deviations = {
+                'early': lambda v: v >= act.desired_start - self.x[a] - P * (1 - self.w[a]),
+                'late': lambda v: v >= self.x[a] - act.desired_start - P * (1 - self.w[a]),
+                'short': lambda v: v >= act.desired_duration - self.d[a] - P * (1 - self.w[a]),
+                'long': lambda v: v >= self.d[a] - act.desired_duration,
+            }
+            for name, constraint in deviations.items():
+                coef = parameters.get(name, 0)
+                if coef > 0:
+                    if not warned:
+                        print(f"Warning: positive penalty parameters are set to 0 ({a}:{name} = {coef}).")
+                        warned = True
+                    coef = 0
+                if coef == 0:
+                    continue
+                v = mdl.continuous_var(lb = 0, name = f'{name}_{a}')
+                self.add_constraint(constraint(v))
+                penalties[name] = (coef, v)
+            self._penalties[a] = penalties
+
+            #error terms of start time and duration, which only apply if the activity is scheduled
+            err = self._errors[a]
+            terms = []
+            if a == 'dawn':
+                terms.append(err['x'][0]) #x[dawn] = 0
+            else:
+                error_x = mdl.piecewise(0, [(t, err['x'][k]) for k, t in enumerate(np.arange(0, 24, 6))], 0)
+                bound_x = max(abs(err['x'])) + 1
+                terms.append(self._product_with_w(a, error_x(self.x[a]), bound_x, 'ex'))
+
+            error_d = mdl.piecewise(0, [(t, err['d'][k]) for k, t in enumerate([0, 1, 3, 8, 12, 16])], err['d'][-1])
+            bound_d = max(abs(err['d'])) + abs(err['d'][-1]) * max(P - 16, 0) + 1
+            terms.append(self._product_with_w(a, error_d(self.d[a]), bound_d, 'ed'))
+            self._error_terms[a] = terms
+
+        #------------------------Add objective function---------------------------------#
+        self.model.maximize(self.objective_function())
+
+    def _product_with_w(self, a: str, expr, bound: float, name: str):
+        """Returns a variable equal to w[a] * expr, when maximised. The absolute value of expr must be lower than bound."""
+        v = self.model.continuous_var(lb = -bound, ub = bound, name = f'{name}_{a}')
+        self.add_constraint(v <= expr + bound * (1 - self.w[a]))
+        self.add_constraint(v <= bound * self.w[a])
+        return v
+
+    def _utility_no_travel(self, activity: ActivityData):
+        """Linearised activity-specific utility function, for schedules without trips."""
+        a = activity.label
+        parameters = activity.activity_parameters or {}
+        err = self._errors[a]
+
+        utility = self.w[a] * parameters.get('constant', 0)
+        utility += self.model.sum(coef * v for coef, v in self._penalties[a].values())
+        utility += self.model.sum(self._error_terms[a])
+
+        #sequence error term. With 'all' (as in the model with trips), w[a] * sum_b error_z(z[a,b]) over all activities b,
+        #which equals w[a] * (error_z(1) * n_successors + error_z(0) * (n_activities - n_successors)), with n_successors = w[a]
+        #(0 for dusk). With 'used', only error_z(1) for the transition to the next activity.
+        successors = [self.z[b, c] for b, c in self.arcs if b == a]
+        utility += err['z'][1] * self.model.sum(successors)
+        if self.sequence_error == 'all':
+            n_unused = len(self.keys) - (1 if successors else 0)
+            utility += err['z'][0] * n_unused * self.w[a]
+
+        #participation error term: error_w(w[a])
+        utility += err['w'][0] + (err['w'][1] - err['w'][0]) * self.w[a]
+
+        return utility
+
     def utility_function(self, activity: ActivityData) -> float:
         """Activity-specific utility function to be defined by the user. Default is linear utility with penalties for schedule deviations (start time and duration)
 
@@ -269,6 +460,9 @@ class MIP(OptimModel):
         ---------------
         utility: value of activity specific utility for current decision variables
         """
+        if self.travel_times is None:
+            return self._utility_no_travel(activity)
+
         parameters = activity.activity_parameters
         a = activity.label
 
@@ -323,19 +517,35 @@ class MIP(OptimModel):
         runtime = time.time() - start_time
 
         objective_function = None
+        solution_df = None
+        self.solve_status = False
+        self.solve_details = self.model.solve_details
 
         if solution:
             mode_travel = {a.label: a.mode_travel for a in self.activities}
             location = {a.label: a.location for a in self.activities}
             act_id = {a.label: a.act_id for a in self.activities}
 
-            solution_df = cplex_to_df(self.w, self.x, self.d, self.tt, self.md_car, mode_travel, self.keys, act_id, location)
+            if self.travel_times is None:
+                solution_df = self._solution_to_df(act_id, location)
+            else:
+                solution_df = cplex_to_df(self.w, self.x, self.d, self.tt, self.md_car, mode_travel, self.keys, act_id, location)
             objective_function = solution.get_objective_value()
 
             self.solve_status = True
-            self.solve_details = self.model.solve_details
 
         return solution_df, runtime, objective_function
+
+    def _solution_to_df(self, act_id: Dict, location: Dict) -> pd.DataFrame:
+        """Stores a solution of the model without trips into a pandas DataFrame, sorted by start time."""
+        types = {a.label: a.type for a in self.activities}
+        rows = [{'act_id': act_id[a], 'label': a, 'act_label': types[a],
+                 'start_time': self.x[a].solution_value, 'duration': self.d[a].solution_value,
+                 'location': location[a]}
+                for a in self.keys if self.w[a].solution_value > 0.5]
+        solution_df = pd.DataFrame(rows).sort_values('start_time').reset_index(drop=True)
+        solution_df['end_time'] = solution_df.start_time + solution_df.duration
+        return solution_df
 
 
     def run(self, n_iter: int = 1, verbose: Union[bool, int] = False) -> Results :

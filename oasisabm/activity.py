@@ -8,7 +8,7 @@ import matplotlib.patches as mpatches
 from matplotlib.colors import ListedColormap, Normalize
 import seaborn as sns
 from typing import List, Tuple, Dict, Optional, Union
-from settings import DESIRED_TIMES
+from oasisabm.settings import DESIRED_TIMES
 
 
 
@@ -49,7 +49,8 @@ class Activity:
     """
     def __init__(self,label: str,start_time: int, duration: int, end_time: Optional[int] =None, mode: Optional[str]= None,
     location: Union[Tuple, str, None] = None, prev_act: Optional[str]= None,
-    next_act: Optional[str]= None, early: Optional[float] = None, late: Optional[float] = None, short: Optional[float] = None, long: Optional[float] = None):
+    next_act: Optional[str]= None, early: Optional[float] = None, late: Optional[float] = None, short: Optional[float] = None, long: Optional[float] = None,
+    desired_times: Optional[Dict] = None):
         self._label = label
         self._start_time = start_time
         self._duration = duration
@@ -79,9 +80,11 @@ class Activity:
         if self._end_time is None:
             self._end_time = self._start_time + self._duration
 
-        if self._label not in ['home', 'dawn', 'dusk']:
-            st_diff = self._start_time - DESIRED_TIMES[self._label]['desired_start_time']
-            d_diff = self._duration - DESIRED_TIMES[self._label]['desired_duration']
+        desired_times = DESIRED_TIMES if desired_times is None else desired_times
+
+        if self._label not in ['home', 'dawn', 'dusk'] and self._label in desired_times:
+            st_diff = self._start_time - desired_times[self._label]['desired_start_time']
+            d_diff = self._duration - desired_times[self._label]['desired_duration']
         else:
             st_diff = 0
             d_diff = 0
@@ -188,7 +191,9 @@ class Activity:
 
         Parameters
         ----------
-        params: Dictionary of parameters to be used in the utility function
+        params: Dictionary of parameters to be used in the utility function. Either Biogeme estimates ({'work:constant': ..., 'F:early': ...})
+        or parameters per activity type ({'work': {'constant': ..., 'early': ...}}), optionally with the preferred times
+        ('desired_start_time', 'desired_duration') of each type.
         reference_act: List of label(s) of the reference activity (default is home)
 
         Return
@@ -199,6 +204,20 @@ class Activity:
 
 
         at = self.label
+
+        if isinstance(params.get(at), dict):
+            p = params[at]
+            if at in reference_act:
+                #home episodes only have a constant
+                return p.get('constant', 0)
+            early, late, short, long = self.early, self.late, self.short, self.long
+            if 'desired_start_time' in p:
+                #deviations from the preferred times given with the parameters (no wrap around midnight)
+                st_diff = self.start_time - p['desired_start_time']
+                d_diff = self.duration - p['desired_duration']
+                early, late, short, long = max(-st_diff, 0), max(st_diff, 0), max(-d_diff, 0), max(d_diff, 0)
+            return p.get('constant', 0) + p.get('early', 0) * early + p.get('late', 0) * late \
+                + p.get('short', 0) * short + p.get('long', 0) * long
 
         flexibility_lookup = {'education': 'NF','work': 'NF','errands_services': 'F','escort': 'NF','leisure': 'F','shopping': 'F', 'home': 'F', 'business_trip': 'NF'}
 
@@ -302,7 +321,7 @@ class Schedule:
         if list_act and len(list_act)>2: #set the anchor nodes to the start times of the existing activities, excluding the first and last one (boundary at home which cannot be changed)
             self._anchor_nodes = [x.start_time for x in list_act[1:-1]]
         else: #if no activity has been passed the anchors are initialized at every hour
-            self._anchor_nodes = np.arange(1, 24)
+            self._anchor_nodes = list(np.arange(1, 24))
 
         self.all_starts = [act.start_time for act in self.list_act]
         self.all_ends = [act.end_time for act in self.list_act]
@@ -519,7 +538,7 @@ class Schedule:
         Parameters
         ---------------
         params: Dictionary of utility parameters
-        rnd_term:random term to add to the utility function
+        rnd_term:random term to add to the utility function (if None, an EV distributed term is drawn)
 
         Returns
         ---------------
@@ -527,7 +546,7 @@ class Schedule:
 
         """
 
-        if not rnd_term:
+        if rnd_term is None:
             #Draw an EV distributed error term
             rnd_term = np.random.gumbel()
 
@@ -541,7 +560,7 @@ class Schedule:
             mode = list_act[i].mode
             travel_times += self.get_travel_time(origin, destination, mode)
 
-        utility = sum([a.compute_utility(params) for a in list_act]) + params['travel_time']*travel_times + rnd_term
+        utility = sum([a.compute_utility(params) for a in list_act]) + params.get('travel_time', 0)*travel_times + rnd_term
 
         return utility
 
@@ -550,7 +569,7 @@ class Schedule:
         Returns activity that is happening at a given time
         """
 
-        start_idx = np.searchsorted(self.all_starts, time, side='right')
+        start_idx = max(np.searchsorted(self.all_starts, time, side='right') - 1, 0)
         activity = self.list_act[start_idx]
 
         return activity

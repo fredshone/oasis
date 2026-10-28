@@ -1,14 +1,16 @@
 import joblib
+from pathlib import Path
 import json
 
-from input_data import data_reader
-from error_terms import GaussianError, EVError
-from simulation import MIP
+from oasisabm.input_data import data_reader
+from oasisabm.error_terms import GaussianError, EVError
+from oasisabm.simulation import MIP
 
 
-DATA = joblib.load('../data/example_data.joblib')
-TT = joblib.load('../data/example_tt.joblib')
-PARAMS = json.load(open('../data/example_parameters.json','r'))
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+DATA = joblib.load(DATA_DIR / 'example_data.joblib')
+TT = joblib.load(DATA_DIR / 'example_tt.joblib')
+PARAMS = json.load(open(DATA_DIR / 'example_parameters.json','r'))
 
 UTILITY_PARAMS = {
     'error_w': GaussianError(),

@@ -4,7 +4,7 @@ import seaborn as sns
 import math
 import os
 
-from activity import Activity, Schedule, ActivityFactory
+from oasisabm.activity import Activity, Schedule, ActivityFactory
 from typing import List, Dict, Tuple, Union, Optional
 
 

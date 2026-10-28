@@ -7,7 +7,7 @@ import matplotlib.patches as mpatches
 
 
 from typing import List, Union, Optional
-from data_utils import plot_schedule, bootstrap_mean, print_time_format, discretize_sched, activity_colors
+from oasisabm.data_utils import plot_schedule, bootstrap_mean, print_time_format, discretize_sched, activity_colors
 
 from collections import defaultdict
 
